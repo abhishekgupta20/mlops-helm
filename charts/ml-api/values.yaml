@@ -1,0 +1,123 @@
+# =============================================================================
+# Default (base) values for the ml-api chart.
+# These are safe, minimal defaults. Each environment overrides only the
+# handful of fields that actually differ (values-dev.yaml / values-staging.yaml
+# / values-production.yaml) -- everything else is inherited from here.
+# =============================================================================
+
+replicaCount: 1
+
+image:
+  # Stand-in "hello world" ML inference API image. Swap this for any real
+  # model-serving image (FastAPI/Flask/BentoML/TorchServe/Triton, etc.) --
+  # the chart itself does not change, only these three values do.
+  repository: gcr.io/google-samples/hello-app
+  tag: "1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- environment label, purely informational, surfaced via configmap + labels
+environment: local
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 2000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  runAsUser: 1000
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: ml-api.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  # Deliberately conservative defaults; each environment tunes these.
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- plain (non-secret) environment variables injected directly
+env: []
+  # - name: MODEL_NAME
+  #   value: "baseline-v1"
+
+# -- ConfigMap-backed configuration, mounted as env vars via envFrom
+configMap:
+  enabled: true
+  data:
+    APP_ENV: "local"
+    LOG_LEVEL: "info"
+    MODEL_VERSION: "1.0.0"
+
+# -- Secret-backed configuration. NEVER put real secret values in this file
+# or in any values-*.yaml committed to git. See README "Secrets Handling"
+# section for the recommended patterns (External Secrets Operator, Sealed
+# Secrets, SOPS, or CI-injected --set-string at deploy time).
+secret:
+  enabled: false
+  # Name of an *externally created* Kubernetes Secret to reference instead of
+  # inlining data here. When set, the chart will NOT create a Secret object
+  # and will instead mount this pre-existing one via envFrom.
+  existingSecret: ""
+  data: {}
+    # DB_PASSWORD: "" # <- populate via --set-string secret.data.DB_PASSWORD=$SECRET at deploy time, never commit
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  failureThreshold: 3
+
+# -- extra raw manifests to append, for anything environment-specific that
+# doesn't warrant a first-class value (kept generic on purpose)
+extraManifests: []

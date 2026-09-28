@@ -1,0 +1,69 @@
+# ========================================
+# PRODUCTION environment overrides
+# ========================================
+
+environment: production
+
+replicaCount: 3
+
+image:
+  tag: "1.0"          # MLEs pin to an immutable, digest-verified release tag
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+  hosts:
+    - host: ml-api.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: ml-api-production-tls
+      hosts:
+        - ml-api.example.com
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 750m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 65
+  targetMemoryUtilizationPercentage: 75
+
+nodeSelector:
+  workload-type: ml-inference
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["ml-api"]
+          topologyKey: "kubernetes.io/hostname"
+
+configMap:
+  data:
+    APP_ENV: "production"
+    LOG_LEVEL: "warn"
+    MODEL_VERSION: "1.0.0"
+
+secret:
+  enabled: true
+  existingSecret: "ml-api-production-secret" # provisioned by External Secrets Operator, see README

@@ -1,0 +1,37 @@
+# ================================
+# DEV environment overrides
+# ================================
+
+environment: dev
+
+replicaCount: 1
+
+image:
+  tag: "1.0"          # MLEs bump this per model/API release
+  pullPolicy: Always  # always pull latest dev image tag
+
+service:
+  type: NodePort   # easy to hit directly from a local Minikube cluster
+
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 96Mi
+
+autoscaling:
+  enabled: false
+
+configMap:
+  data:
+    APP_ENV: "dev"
+    LOG_LEVEL: "debug"
+    MODEL_VERSION: "dev-latest"
+
+secret:
+  enabled: false

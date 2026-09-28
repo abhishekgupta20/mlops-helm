@@ -1,0 +1,7 @@
+.git/
+.gitignore
+.vscode/
+*.tgz
+.idea/
+*.swp
+tests/__snapshot__/
