@@ -1,0 +1,177 @@
+# ==============================================================================
+# CI/CD for the ml-api Helm chart itself (NOT for the ML API application code).
+#
+# PR pipeline  -> lint + template-render + unit tests            (fast, cheap)
+# main pipeline -> lint + unit tests + version bump check + package
+#                  + push to a private OCI Helm repository       (release)
+#
+# The chart is pushed to a private OCI-based Helm registry (GHCR is used here
+# as a free stand-in for a private cloud registry such as ECR/ACR/Artifact
+# Registry -- swap the `REGISTRY` value and login step for your cloud of
+# choice; the `helm push` step is registry-agnostic since Helm 3.8+ ).
+# ==============================================================================
+name: helm-ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "charts/ml-api/**"
+      - ".github/workflows/helm-ci-cd.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "charts/ml-api/**"
+      - ".github/workflows/helm-ci-cd.yaml"
+
+env:
+  CHART_DIR: charts/ml-api
+  REGISTRY: ghcr.io
+  # Private OCI repo the chart is published to, e.g. ghcr.io/your-org/charts
+  CHART_OCI_REPO: ghcr.io/${{ github.repository_owner }}/charts
+
+permissions:
+  contents: read
+  packages: write   # needed to push to GHCR's OCI registry
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Lint & validate - runs on every PR and every push
+  # ---------------------------------------------------------------------------
+  lint-and-test:
+    name: Lint, template & unit test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.2"
+
+      - name: Add helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest
+
+      - name: helm lint (default values)
+        run: helm lint ${{ env.CHART_DIR }}
+
+      - name: helm lint (per-environment values)
+        run: |
+          for env in dev staging production; do
+            echo "::group::lint ${env}"
+            helm lint ${{ env.CHART_DIR }} -f ${{ env.CHART_DIR }}/values-${env}.yaml
+            echo "::endgroup::"
+          done
+
+      - name: helm template (render sanity check, all environments)
+        run: |
+          for env in dev staging production; do
+            echo "::group::template ${env}"
+            helm template ml-api-${env} ${{ env.CHART_DIR }} \
+              -f ${{ env.CHART_DIR }}/values-${env}.yaml > /tmp/rendered-${env}.yaml
+            # fail fast if the render produced nothing or invalid multi-doc YAML
+            test -s /tmp/rendered-${env}.yaml
+            echo "::endgroup::"
+          done
+
+      - name: Validate rendered manifests against Kubernetes schemas (kubeconform)
+        uses: docker://ghcr.io/yannh/kubeconform:latest
+        continue-on-error: true   # informative only; do not block on schema drift
+        with:
+          args: -strict -summary /tmp/rendered-dev.yaml /tmp/rendered-staging.yaml /tmp/rendered-production.yaml
+
+      - name: helm unittest (chart-level unit tests)
+        run: helm unittest ${{ env.CHART_DIR }}
+
+      - name: Static security scan of rendered manifests (kubesec-style, via checkov)
+        uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true    # advisory in this assignment; make blocking once tuned
+        with:
+          directory: ${{ env.CHART_DIR }}
+          framework: helm
+
+  # ---------------------------------------------------------------------------
+  # 2) Package & publish - only on merge to main
+  # ---------------------------------------------------------------------------
+  package-and-publish:
+    name: Package chart & push to private OCI registry
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.2"
+
+      - name: Read chart version
+        id: chart_version
+        run: |
+          version=$(grep '^version:' ${{ env.CHART_DIR }}/Chart.yaml | awk '{print $2}')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package chart
+        run: helm package ${{ env.CHART_DIR }} --destination ./dist
+
+      - name: Log in to private OCI registry (GHCR shown; swap for ECR/ACR/GAR)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart to OCI registry
+        run: |
+          helm push ./dist/ml-api-${{ steps.chart_version.outputs.version }}.tgz \
+            oci://${{ env.CHART_OCI_REPO }}
+
+      - name: Tag & create GitHub release for the chart version
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ml-api-chart-v${{ steps.chart_version.outputs.version }}
+          name: ml-api chart v${{ steps.chart_version.outputs.version }}
+          files: ./dist/ml-api-${{ steps.chart_version.outputs.version }}.tgz
+          generate_release_notes: true
+
+      - name: Summary
+        run: |
+          echo "### Published ml-api chart v${{ steps.chart_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "Pull it with:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "helm pull oci://${{ env.CHART_OCI_REPO }}/ml-api --version ${{ steps.chart_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # 3) (Optional, illustrative) Auto-deploy to a long-lived Dev cluster after
+  #    every successful publish -- MLEs never run `helm upgrade` by hand for Dev.
+  #    Staging/Production intentionally require a manual "workflow_dispatch"
+  #    or GitOps promotion (see README "Promotion Strategy").
+  # ---------------------------------------------------------------------------
+  deploy-to-dev:
+    name: Auto-deploy chart to Dev cluster
+    needs: package-and-publish
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.2"
+
+      - name: Configure kubeconfig for Dev cluster
+        run: echo "${{ secrets.DEV_KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
+
+      - name: helm upgrade --install (Dev)
+        run: |
+          helm upgrade --install ml-api-dev ${{ env.CHART_DIR }} \
+            -f ${{ env.CHART_DIR }}/values-dev.yaml \
+            --namespace ml-api-dev --create-namespace \
+            --wait --timeout 3m
+
+      - name: helm test (post-deploy smoke test)
+        run: helm test ml-api-dev --namespace ml-api-dev
