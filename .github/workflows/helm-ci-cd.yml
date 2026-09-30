@@ -37,7 +37,10 @@ jobs:
           version: "v3.16.2"
 
       - name: Add helm-unittest plugin
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest
+        # Pinned to v0.7.2 (stable, predates the newer plugin.yaml schema
+        # that isn't compatible with Helm 3.16.x). "latest" can silently
+        # jump to a release Helm here can't parse.
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.7.2
 
       - name: helm lint (default + each environment's values)
         run: |
@@ -94,3 +97,4 @@ jobs:
         run: |
           echo "Published ml-api chart v${{ steps.chart_version.outputs.version }} to oci://${{ env.CHART_OCI_REPO }}" >> $GITHUB_STEP_SUMMARY
           echo 'Pull it with: helm pull oci://${{ env.CHART_OCI_REPO }}/ml-api --version ${{ steps.chart_version.outputs.version }}' >> $GITHUB_STEP_SUMMARY
+          
